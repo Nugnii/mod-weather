@@ -46,10 +46,48 @@ export function decide(
   return 'hold'
 }
 
-export const coldText = (minutes: number, count: number) =>
+// ponytail: list prices, $ per 1M input tokens, from the Claude API reference (cached 2026-11-03);
+// a model not listed gets no price. Fast mode and partner clouds are not priced.
+const INPUT_USD: [string, number][] = [
+  ['claude-fable-5-2', 8], ['claude-mythos-5-2', 8], ['claude-fable-5-1', 10], ['claude-mythos-5-1', 10],
+  ['claude-fable-5', 10], ['claude-opus-5-5', 4], ['claude-opus-5', 5], ['claude-opus-4-8', 5],
+  ['claude-opus-4-7', 5], ['claude-opus-4-6', 5], ['claude-sonnet-5-5', 2], ['claude-sonnet-5', 2],
+  ['claude-sonnet-4-6', 3], ['claude-haiku-5-5', 0.1], ['claude-haiku-4-5', 1],
+]
+// A cache read as a share of the input price: 0.1 for every model not named here.
+const READ_SHARE: [string, number][] = [
+  ['claude-fable-5-2', 0.025], ['claude-mythos-5-2', 0.025], ['claude-fable-5-1', 0.025],
+  ['claude-mythos-5-1', 0.025], ['claude-opus-5-5', 0.05], ['claude-sonnet-5-5', 0.05],
+]
+// A cache write as a share of the input price, by the lifetime written.
+const WRITE_SHARE = { '5m': 1.25, '1h': 2 } as const
+
+// The longest id the model's id starts with, so claude-opus-5-5 never reads as claude-opus-5.
+const priceOf = (table: [string, number][], model: string) =>
+  [...table].sort((a, b) => b[0].length - a[0].length).find(([id]) => model.startsWith(id))?.[1]
+
+// What sending now costs: the whole dialog written to the cache again (cold), against what the
+// same message would have cost read from a warm cache.
+export function rereadUsd(model: string, count: number, ttl: '5m' | '1h') {
+  let input = priceOf(INPUT_USD, model)
+  if (input === undefined) return undefined
+  if (model.startsWith('claude-haiku-5-5') && count > 100_000) input = 0.5
+  const perToken = input / 1_000_000
+  return {
+    cold: count * perToken * WRITE_SHARE[ttl],
+    warm: count * perToken * (priceOf(READ_SHARE, model) ?? 0.1),
+  }
+}
+
+const usd = (n: number) => `$${n < 0.1 ? n.toFixed(3) : n.toFixed(2)}`
+
+export const coldText = (minutes: number, count: number, cost?: { cold: number; warm: number }) =>
   `Кеш, скорее всего, остыл: с последнего ответа прошло ${minutes} мин. ` +
-  `Это сообщение заново прочитает весь диалог, около ${tokens(count)} токенов. ` +
-  'Нажмите Enter ещё раз, чтобы отправить.'
+  `Это сообщение заново прочитает весь диалог, около ${tokens(count)} токенов` +
+  (cost === undefined
+    ? ''
+    : ` — это ≈ ${usd(cost.cold)} по ценам API (с тёплым кешем было бы ${usd(cost.warm)})`) +
+  '. Нажмите Enter ещё раз, чтобы отправить.'
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -107,11 +145,18 @@ export const register: Register = on => {
       return next(e)
     }
     const { context } = await $.session.usage()
+    const count = context.tokens ?? 0
     const minutes = mark === null ? 0 : Math.floor((now - mark.at) / 60_000)
-    await update($, armedRef, () => ({ at: now, minutes, tokens: context.tokens ?? 0 }))
+    const cost = mark === null ? undefined : rereadUsd(await $.session.model(), count, mark.ttl)
+    await update($, armedRef, () => ({ at: now, minutes, tokens: count, ...cost }))
     await $.prompt.fill({ text: e.text })
 
-    return { drop: 'Кеш остыл: Enter ещё раз отправит сообщение.' }
+    return {
+      drop:
+        cost === undefined
+          ? 'Кеш остыл: Enter ещё раз отправит сообщение.'
+          : `Кеш остыл: отправка ≈ ${usd(cost.cold)} по ценам API. Enter ещё раз отправит сообщение.`,
+    }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -134,7 +179,15 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {armed !== null && now - armed.at < CONFIRM_MS && (
           <Box borderStyle="round" borderColor="warning" paddingX={1}>
-            <Text color="warning">{coldText(armed.minutes, armed.tokens)}</Text>
+            <Text color="warning">
+              {coldText(
+                armed.minutes,
+                armed.tokens,
+                armed.cold === undefined || armed.warm === undefined
+                  ? undefined
+                  : { cold: armed.cold, warm: armed.warm },
+              )}
+            </Text>
           </Box>
         )}
         <Box flexDirection="row" flexWrap="wrap" columnGap={1}>

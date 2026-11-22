@@ -1,6 +1,23 @@
 import { expect, test } from 'claude-code/testing'
 
-import { decide, tokens, weather } from '../hooks/register'
+import { coldText, decide, rereadUsd, tokens, weather } from '../hooks/register'
+
+test('the reread price: the owner’s live session, Opus 5.5 with a 1M window and a 1h cache', async () => {
+  // 430k tokens written to the cache again at 2× the $4 input, against a read at 0.05×.
+  const cost = rereadUsd('claude-opus-5-5[1m]', 430_000, '1h')
+  const mills = (n: number | undefined) => (n === undefined ? n : Math.round(n * 1000))
+  expect(mills(cost?.cold)).toBe(3440)
+  expect(mills(cost?.warm)).toBe(86)
+  expect(coldText(61, 430_000, cost)).toBe(
+    'Кеш, скорее всего, остыл: с последнего ответа прошло 61 мин. Это сообщение заново прочитает ' +
+      'весь диалог, около 430k токенов — это ≈ $3.44 по ценам API (с тёплым кешем было бы $0.086). ' +
+      'Нажмите Enter ещё раз, чтобы отправить.',
+  )
+  // claude-opus-5 ($5) must not swallow claude-opus-5-5 ($4); a 5-minute write is 1.25×.
+  expect(mills(rereadUsd('claude-opus-5', 100_000, '5m')?.cold)).toBe(625)
+  expect(rereadUsd('some-other-model', 100_000, '5m')).toBeUndefined()
+  expect(coldText(6, 96_000)).toContain('около 96k токенов. Нажмите Enter')
+})
 
 test('the scale names the screenshots’ levels', async () => {
   expect(weather(0).name).toBe('Ясно')
