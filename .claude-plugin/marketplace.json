@@ -1,0 +1,5 @@
+{
+  "name": "mod-weather",
+  "owner": { "name": "Nugnii" },
+  "plugins": [{ "name": "context-weather", "source": "./" }]
+}
